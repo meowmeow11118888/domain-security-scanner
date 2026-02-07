@@ -2,27 +2,34 @@
 
 ![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Version](https://img.shields.io/badge/version-2.1-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-2.2-brightgreen.svg)
 
-Batch check domain mail security configuration including MX, SPF, DKIM, DMARC records with **enhanced DKIM key strength analysis** and **DMARC policy evaluation**. Get detailed risk assessment and remediation recommendations.
+Batch check domain mail security configuration including MX, SPF, DKIM, DMARC records with **SPF qualifier analysis**, **DKIM key strength analysis** and **DMARC policy evaluation**. Get detailed risk assessment and remediation recommendations.
 
-## ✨ What's New in v2.1
+## ✨ What's New in v2.2
+
+- 📧 **SPF Qualifier Analysis**: Detect -all (best), ~all (acceptable), ?all/+all (weak)
+- ⚡ **Enhanced SPF Scoring**: -all gets 30 points, ~all gets 28 points
+- ⚠️ **Weak SPF Warnings**: Automatic alerts for weak qualifiers
+
+## What's New in v2.1
 
 - 🔑 **DKIM Key Length Analysis**: Detect 1024-bit (weak) vs 2048-bit (strong) RSA keys
 - 🛡️ **Enhanced DMARC Evaluation**: Detailed scoring for p=reject/quarantine/none policies
 - ⚠️ **Smart Warnings**: Automatic alerts for weak configurations
-- 📊 **Improved Scoring**: More accurate security assessment based on key strength and policy strictness
+- 📊 **Improved Scoring**: More accurate security assessment
 
 ## Features
 
 - ✅ **Batch Scanning**: Check dozens to hundreds of domains at once
-- 🔍 **Complete Check**: Covers MX, SPF, DKIM (with key analysis), DMARC, and A records
+- 🔍 **Complete Check**: Covers MX, SPF (with qualifiers), DKIM (with key analysis), DMARC, and A records
+- 📧 **SPF Qualifier Check**: Validates ending (-all recommended, ~all acceptable, ?all/+all weak)
 - 🔑 **DKIM Key Strength**: Validates RSA key length (2048-bit recommended, 1024-bit flagged as weak)
 - 🛡️ **DMARC Policy Check**: Evaluates p=reject (best), p=quarantine (acceptable), p=none (weak)
-- 📊 **Smart Scoring**: 0-100 security score with enhanced evaluation logic
+- 📊 **Smart Scoring**: 0-100 security score with comprehensive evaluation logic
 - 🎯 **Risk Classification**: Auto-categorize with detailed warnings
-- 📝 **Detailed Reports**: Comprehensive CSV reports with key strength and policy analysis
-- 💡 **Fix Recommendations**: Specific guidance for weak keys and policies
+- 📝 **Detailed Reports**: Comprehensive CSV reports with all security metrics
+- 💡 **Fix Recommendations**: Specific guidance for weak configurations
 - ⚡ **Cross-platform**: Supports Windows, Linux, macOS
 - 🚀 **Parallel Scanning**: Multi-threaded acceleration support (optional)
 
@@ -42,7 +49,7 @@ python3 --version
 
 ### 1. Clone the Project
 ```bash
-git clone https://github.com/meowmeow11118888/domain-security-scanner.git
+git clone https://github.com/yourusername/domain-security-scanner.git
 cd domain-security-scanner
 ```
 
@@ -126,6 +133,7 @@ The script generates a comprehensive CSV report:
 
 Contains complete check results for each domain including:
 - All DNS record details (MX, SPF, DKIM, DMARC, A)
+- **SPF Qualifier** (-all, ~all, ?all, +all, or none)
 - **DKIM Key Length** (e.g., 1024-bit, 2048-bit)
 - **DKIM Key Strength** (Strong/Weak/Unknown)
 - **DMARC Policy** (reject/quarantine/none)
@@ -135,14 +143,17 @@ Contains complete check results for each domain including:
 
 Can be opened in Excel, Google Sheets, or any spreadsheet application.
 
-## Enhanced Security Scoring (v2.1)
+## Enhanced Security Scoring (v2.2)
 
 ### Total: 100 points
 
 | Component | Max Points | Details |
 |-----------|------------|---------|
 | **MX Record** | 20 points | Has mail server configured |
-| **SPF Record** | 30 points | Sender Policy Framework configured |
+| **SPF Record** | 30 points | **Enhanced scoring based on qualifier:** |
+| | | • -all (hard fail): **30 points** (best practice) |
+| | | • ~all (soft fail): **28 points** (acceptable) |
+| | | • ?all/+all/none: **25 points** (weak - needs fix) |
 | **DKIM Record** | 25 points | **Enhanced scoring based on key strength:** |
 | | | • 2048-bit or higher: **25 points** (full score) |
 | | | • 1024-bit key: **20 points** (weak, -5 penalty) |
@@ -154,25 +165,76 @@ Can be opened in Excel, Google Sheets, or any spreadsheet application.
 
 ### Score Grades
 
-- **90-100**: Excellent (Best Practice - Strong keys + strict policies)
+- **90-100**: Excellent (Best Practice - -all + strong keys + p=reject)
 - **70-89**: Good (Minor improvements recommended)
 - **50-69**: Fair (Notable security gaps)
 - **30-49**: Needs Improvement (Significant risks)
 - **0-29**: Critical (Immediate action required)
 
-## Configuration Status Explained
+## SPF Qualifier Guidelines (NEW in v2.2)
 
-| Status | Description | Security Level |
-|--------|-------------|----------------|
-| **Full Protection (Best Practice)** | MX + SPF + DKIM (2048-bit) + DMARC (p=reject) | 🟢 Excellent |
-| **Full Protection** | MX + SPF + DKIM + DMARC (p=reject or p=quarantine) | 🟢 Good |
-| **Good Protection (Weak DKIM Key)** | Complete setup but DKIM uses 1024-bit key | 🟡 Needs Upgrade |
-| **Good Protection (Missing DKIM)** | MX + SPF + DMARC | 🟡 Good |
-| **Good Protection (Missing DMARC)** | MX + SPF + DKIM | 🟡 Add DMARC |
-| **Basic Protection** | MX + SPF only | 🟡 Basic |
-| **High Risk (Missing SPF)** | MX without SPF - vulnerable to spoofing | 🔴 Urgent |
-| **Abnormal Configuration** | SPF without MX | 🟠 Review |
-| **No Mail Configuration** | No mail-related records | ⚪ N/A |
+### What are SPF Qualifiers?
+
+SPF qualifiers determine how receiving mail servers handle emails that don't match your SPF record:
+
+| Qualifier | Name | Meaning | Recommendation | Score |
+|-----------|------|---------|----------------|-------|
+| **-all** | Hard Fail | Reject emails not matching SPF | 🟢 **Recommended** - Best security | 30/30 pts |
+| **~all** | Soft Fail | Mark as suspicious, usually accept | 🟡 **Acceptable** - Transitional | 28/30 pts |
+| **?all** | Neutral | No policy, don't fail | 🔴 **Weak** - Provides no protection | 25/30 pts |
+| **+all** | Pass | Accept all emails | 🔴 **Very Weak** - Defeats SPF purpose | 25/30 pts |
+
+### Why -all is Best Practice
+
+1. **Maximum Protection**: Receiving servers will reject forged emails
+2. **Clear Policy**: No ambiguity in handling unauthorized senders
+3. **Industry Standard**: Recommended by RFC 7208 and email security experts
+4. **Better Reputation**: Shows you take email security seriously
+
+### Transition Path
+
+If you're currently using **~all**, here's a safe upgrade path:
+
+```
+# Phase 1: Current (soft fail)
+v=spf1 mx include:_spf.google.com ~all
+
+# Phase 2: Monitor for issues (2-4 weeks)
+# Check spam reports and legitimate email delivery
+
+# Phase 3: Upgrade to hard fail
+v=spf1 mx include:_spf.google.com -all
+```
+
+### Common SPF Examples
+
+**Basic with -all:**
+```
+v=spf1 mx -all
+```
+
+**Google Workspace:**
+```
+v=spf1 include:_spf.google.com -all
+```
+
+**Microsoft 365:**
+```
+v=spf1 include:spf.protection.outlook.com -all
+```
+
+**Multiple sources:**
+```
+v=spf1 mx include:_spf.google.com include:servers.mcsv.net -all
+```
+
+### What the Tool Detects
+
+The scanner analyzes the SPF record ending:
+- Extracts the "all" mechanism qualifier
+- Flags ~all with **[NOTICE]** for upgrade consideration
+- Flags ?all/+all/none with **[WARNING]** for urgent fix
+- Awards bonus points for -all (hard fail)
 
 ## DKIM Key Strength Guidelines
 
@@ -190,13 +252,6 @@ Can be opened in Excel, Google Sheets, or any spreadsheet application.
 | 2048-bit | 🟢 Strong | **Recommended** - Industry standard |
 | 4096-bit | 🟢 Very Strong | Optional - May have size limitations |
 
-### How the Tool Detects Key Length
-
-The scanner analyzes the public key in DKIM TXT records:
-- Decodes the base64-encoded public key (p= parameter)
-- Estimates RSA modulus length from decoded data
-- Flags 1024-bit keys with warnings and score penalties
-
 ## DMARC Policy Guidelines
 
 ### Policy Levels
@@ -213,17 +268,6 @@ The scanner analyzes the public key in DKIM TXT records:
 2. **Move to p=quarantine**: Test impact on legitimate email flow
 3. **Enforce with p=reject**: Maximum protection once confident
 
-```
-# Phase 1: Monitoring (Start here)
-v=DMARC1; p=none; rua=mailto:dmarc-reports@yourdomain.com
-
-# Phase 2: Gradual enforcement
-v=DMARC1; p=quarantine; pct=10; rua=mailto:dmarc-reports@yourdomain.com
-
-# Phase 3: Full protection (Goal)
-v=DMARC1; p=reject; pct=100; rua=mailto:dmarc-reports@yourdomain.com
-```
-
 ## Console Output Examples
 
 ### Summary Report
@@ -237,6 +281,9 @@ Mail Enabled: 45 (90.0%)
 
 Email Authentication:
   SPF Protected: 43 (86.0%)
+    - -all (Hard Fail): 35 [Best Practice]
+    - ~all (Soft Fail): 6 [Acceptable]
+    - ?all/+all/none: 2 [Weak - Upgrade Recommended]
   DKIM Protected: 38 (76.0%)
     - Strong Keys (2048-bit+): 32
     - Weak Keys (1024-bit): 6 [Upgrade Recommended]
@@ -248,16 +295,32 @@ Email Authentication:
 Overall Status:
   Full Protection: 28
   High Risk Domains: 2
-  Average Security Score: 76.8 / 100
+  Average Security Score: 78.4 / 100
 ```
 
 ### Warning Sections
 
-The tool displays three types of warnings:
+The tool displays four types of warnings:
 
 1. **High Risk Domains**: Missing SPF (immediate threat)
-2. **Weak DKIM Keys**: 1024-bit keys needing upgrade
-3. **Weak DMARC Policy**: p=none policies in production
+2. **Weak SPF Qualifiers**: Using ~all, ?all, or +all (needs upgrade)
+3. **Weak DKIM Keys**: 1024-bit keys needing upgrade
+4. **Weak DMARC Policy**: p=none policies in production
+
+## Configuration Status Explained
+
+| Status | Description | Security Level |
+|--------|-------------|----------------|
+| **Full Protection (Best Practice)** | MX + SPF (-all) + DKIM (2048-bit) + DMARC (p=reject) | 🟢 Excellent |
+| **Full Protection** | MX + SPF + DKIM + DMARC (p=reject or p=quarantine) | 🟢 Good |
+| **Good Protection (Weak SPF)** | Complete setup but SPF uses ~all or weaker | 🟡 Upgrade SPF |
+| **Good Protection (Weak DKIM Key)** | Complete setup but DKIM uses 1024-bit key | 🟡 Needs Upgrade |
+| **Good Protection (Missing DKIM)** | MX + SPF + DMARC | 🟡 Add DKIM |
+| **Good Protection (Missing DMARC)** | MX + SPF + DKIM | 🟡 Add DMARC |
+| **Basic Protection** | MX + SPF only | 🟡 Basic |
+| **High Risk (Missing SPF)** | MX without SPF - vulnerable to spoofing | 🔴 Urgent |
+| **Abnormal Configuration** | SPF without MX | 🟠 Review |
+| **No Mail Configuration** | No mail-related records | ⚪ N/A |
 
 ## Usage Examples
 
@@ -283,6 +346,26 @@ python domain_security_scanner.py -f domains.txt --dkim-selectors google,googlem
 
 ## Remediation Guide
 
+### Upgrade SPF from ~all to -all
+
+#### Before (Soft Fail - 28 points)
+```
+v=spf1 mx include:_spf.google.com ~all
+```
+
+#### After (Hard Fail - 30 points)
+```
+v=spf1 mx include:_spf.google.com -all
+```
+
+#### Steps
+1. Review current SPF record in DNS
+2. Monitor email delivery for 1-2 weeks
+3. Ensure all legitimate senders are in SPF record
+4. Change `~all` to `-all`
+5. Update DNS TXT record
+6. Monitor for 48-72 hours after change
+
 ### Upgrade Weak DKIM Keys (1024-bit → 2048-bit)
 
 #### Google Workspace
@@ -295,13 +378,6 @@ python domain_security_scanner.py -f domains.txt --dkim-selectors google,googlem
 1. Exchange Admin Center → Protection → DKIM
 2. Rotate keys → Choose 2048-bit
 3. Update DNS records
-
-#### Generic Steps (Any Provider)
-```bash
-# Generate 2048-bit DKIM key (using openssl)
-openssl genrsa -out dkim_private.pem 2048
-openssl rsa -in dkim_private.pem -pubout -outform der 2>/dev/null | openssl base64 -A
-```
 
 ### Strengthen DMARC Policy
 
@@ -325,28 +401,6 @@ v=DMARC1; p=quarantine; pct=100; rua=mailto:dmarc-reports@yourdomain.com
 v=DMARC1; p=reject; pct=100; rua=mailto:dmarc-reports@yourdomain.com; adkim=s; aspf=s
 ```
 
-### SPF Record Examples
-
-**Basic setup:**
-```
-v=spf1 mx ~all
-```
-
-**Google Workspace:**
-```
-v=spf1 include:_spf.google.com ~all
-```
-
-**Microsoft 365:**
-```
-v=spf1 include:spf.protection.outlook.com ~all
-```
-
-**Multiple sources:**
-```
-v=spf1 mx include:_spf.google.com include:servers.mcsv.net ~all
-```
-
 ## Performance Notes
 
 ### Scan Speed
@@ -364,7 +418,7 @@ v=spf1 mx include:_spf.google.com include:servers.mcsv.net ~all
 
 ### Email Security Baseline
 - [ ] MX records configured
-- [ ] SPF record with proper includes
+- [ ] SPF record with **-all ending**
 - [ ] DKIM with **2048-bit keys**
 - [ ] DMARC with **p=quarantine** or **p=reject**
 - [ ] Regular monitoring of DMARC reports
@@ -372,36 +426,11 @@ v=spf1 mx include:_spf.google.com include:servers.mcsv.net ~all
 ### Scoring 90+ Points
 To achieve "Excellent" rating:
 1. ✅ Configure all four records (MX, SPF, DKIM, DMARC)
-2. ✅ Use 2048-bit or higher DKIM keys
-3. ✅ Set DMARC policy to p=reject
-4. ✅ Regular audits (quarterly recommended)
+2. ✅ Use **-all** in SPF (hard fail)
+3. ✅ Use 2048-bit or higher DKIM keys
+4. ✅ Set DMARC policy to **p=reject**
+5. ✅ Regular audits (quarterly recommended)
 
-## Use Cases
-
-- 🏢 **Enterprise IT**: Audit multiple subsidiary domains
-- 🔒 **Security Teams**: Identify vulnerable configurations
-- 🌐 **MSPs**: Manage client email security compliance
-- 📊 **Compliance**: Meet email authentication standards (DMARC.org, IRS, etc.)
-- 🚀 **Migration**: Verify configuration after mail server changes
-- 🐧 **DevOps**: Integrate into CI/CD pipelines for automated checks
-
-## Changelog
-
-### v2.1 (2026-02-07)
-- ✨ **NEW**: DKIM RSA key length analysis (1024 vs 2048-bit)
-- ✨ **NEW**: Enhanced DMARC policy scoring (reject/quarantine/none)
-- 🔧 **IMPROVED**: More granular security scoring
-- 🔧 **IMPROVED**: Smart warnings for weak configurations
-- 📝 **ADDED**: Key strength and policy columns in CSV
-- 📝 **ADDED**: Separate warning sections in console output
-
-### v2.0 (2026-02-04)
-- ✨ Python version initial release
-- ✨ DKIM record checking
-- ✨ Security score calculation (0-100)
-- ✨ Command-line argument support
-- ✨ Parallel scanning support
-- ✨ Cross-platform support
 
 ## Related Resources
 
@@ -437,9 +466,11 @@ To achieve "Excellent" rating:
 - Do not use for unauthorized reconnaissance
 
 ## License
+
 MIT License - See [LICENSE](LICENSE) file for details
 
 ## Contributing
+
 Issues and Pull Requests are welcome!
 
 ### Development Guidelines
@@ -449,7 +480,7 @@ Issues and Pull Requests are welcome!
 - Test across different email providers
 
 ## Author
-- https://github.com/meowmeow11118888
+https://github.com/meowmeow11118888
 
 ## Disclaimer
 
