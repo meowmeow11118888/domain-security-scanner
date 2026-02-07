@@ -4,8 +4,13 @@
 Domain Security Scanner - Mail Security Configuration Tool
 
 Author: Your Name
-Version: 2.1
+Version: 2.2
 License: MIT
+
+Changelog v2.2:
+- Added SPF qualifier analysis (-all best practice, ~all acceptable, ?all weak)
+- Enhanced SPF scoring based on qualifier strength
+- Added SPF qualifier warnings and statistics
 
 Changelog v2.1:
 - Added DKIM key length verification (2048-bit recommended, 1024-bit weak)
@@ -40,10 +45,11 @@ class DomainResult:
     mx_records: str = ""
     has_spf: bool = False
     spf_record: str = ""
+    spf_qualifier: str = ""  # New field: -all, ~all, ?all, etc.
     has_dkim: bool = False
     dkim_selectors: str = ""
-    dkim_key_length: str = ""  # New field for key length
-    dkim_key_strength: str = ""  # New field: Strong/Weak/Unknown
+    dkim_key_length: str = ""
+    dkim_key_strength: str = ""
     has_dmarc: bool = False
     dmarc_record: str = ""
     dmarc_policy: str = ""
@@ -131,6 +137,30 @@ class DomainScanner:
         except Exception:
             return None, "Unknown"
 
+    def extract_spf_qualifier(self, spf_record: str) -> str:
+        """
+        Extract SPF all mechanism qualifier
+        Returns: -all, ~all, ?all, +all, or empty if not found
+        """
+        # Look for the "all" mechanism with qualifier (dash at end to avoid escaping issues)
+        match = re.search(r'([-~+?])all', spf_record)
+        if match:
+            qualifier = match.group(1)
+            if qualifier == '-':
+                return "-all"
+            elif qualifier == '~':
+                return "~all"
+            elif qualifier == '?':
+                return "?all"
+            elif qualifier == '+':
+                return "+all"
+
+        # Check if there's just "all" without qualifier (implies +all)
+        if re.search(r'\ball\b', spf_record):
+            return "+all"
+
+        return ""
+
     def check_mx(self, domain: str) -> tuple:
         """Check MX records"""
         mx_records = self.query_dns_safe(domain, 'MX')
@@ -143,18 +173,22 @@ class DomainScanner:
 
         return True, len(mx_records), "; ".join(mx_list)
 
-    def check_spf(self, domain: str) -> tuple:
-        """Check SPF records"""
+    def check_spf(self, domain: str) -> Tuple[bool, str, str]:
+        """
+        Check SPF records with qualifier analysis
+        Returns: (has_spf, spf_record, spf_qualifier)
+        """
         txt_records = self.query_dns_safe(domain, 'TXT')
         if not txt_records:
-            return False, ""
+            return False, "", ""
 
         for record in txt_records:
             txt = record.to_text().strip('"')
             if txt.startswith('v=spf1'):
-                return True, txt
+                qualifier = self.extract_spf_qualifier(txt)
+                return True, txt, qualifier
 
-        return False, ""
+        return False, "", ""
 
     def check_dkim(self, domain: str) -> Tuple[bool, str, str, str]:
         """
@@ -227,7 +261,7 @@ class DomainScanner:
 
     def calculate_score(self, result: DomainResult) -> int:
         """
-        Calculate security score with enhanced DKIM and DMARC evaluation
+        Calculate security score with enhanced evaluation
         Total: 100 points
         """
         score = 0
@@ -236,9 +270,21 @@ class DomainScanner:
         if result.has_mx:
             score += 20
 
-        # SPF record: 30 points
+        # SPF record: up to 30 points (with qualifier bonus)
         if result.has_spf:
-            score += 30
+            # Base score for having SPF
+            score += 25
+
+            # Qualifier bonus
+            if result.spf_qualifier == "-all":
+                # Hard fail (best practice): full 5 bonus points
+                score += 5
+            elif result.spf_qualifier == "~all":
+                # Soft fail (acceptable): 3 bonus points
+                score += 3
+            elif result.spf_qualifier in ["?all", "+all", ""]:
+                # Neutral/Pass/None (weak): 0 bonus points
+                score += 0
 
         # DKIM record: up to 25 points
         if result.has_dkim:
@@ -283,6 +329,15 @@ class DomainScanner:
 
         result.mail_enabled = "Yes"
 
+        # Check SPF qualifier
+        if result.has_spf:
+            if result.spf_qualifier == "~all":
+                recommendations.append("[NOTICE] SPF uses ~all (soft fail), consider upgrading to -all (hard fail)")
+            elif result.spf_qualifier in ["?all", "+all"]:
+                recommendations.append("[WARNING] SPF uses weak qualifier, must change to -all for proper protection")
+            elif not result.spf_qualifier:
+                recommendations.append("[WARNING] SPF missing 'all' mechanism, add -all for best protection")
+
         # Check DKIM key strength
         if result.has_dkim and "Weak" in result.dkim_key_strength:
             recommendations.append("[WARNING] DKIM uses weak 1024-bit key, upgrade to 2048-bit")
@@ -297,17 +352,19 @@ class DomainScanner:
         # Determine configuration status
         if (result.has_mx and result.has_spf and result.has_dkim and 
             result.has_dmarc and result.dmarc_policy == 'reject' and
-            "Strong" in result.dkim_key_strength):
+            "Strong" in result.dkim_key_strength and result.spf_qualifier == "-all"):
             status = "Full Protection (Best Practice)"
         elif (result.has_mx and result.has_spf and result.has_dkim and 
               result.has_dmarc and result.dmarc_policy in ['reject', 'quarantine']):
             if "Weak" in result.dkim_key_strength:
                 status = "Good Protection (Weak DKIM Key)"
+            elif result.spf_qualifier in ["?all", "+all", ""]:
+                status = "Good Protection (Weak SPF)"
             else:
                 status = "Full Protection"
         elif result.has_mx and result.has_spf and result.has_dmarc:
             status = "Good Protection (Missing DKIM)"
-            recommendations.append("Recommend setting up DKIM for enhanced authentication")
+            recommendations.append("Recommend setting up DKIM with 2048-bit key")
         elif result.has_mx and result.has_spf and result.has_dkim:
             status = "Good Protection (Missing DMARC)"
             recommendations.append("Recommend adding DMARC record with p=quarantine or p=reject")
@@ -334,7 +391,9 @@ class DomainScanner:
         # Check all records
         result.has_a, result.a_records = self.check_a(domain)
         result.has_mx, result.mx_count, result.mx_records = self.check_mx(domain)
-        result.has_spf, result.spf_record = self.check_spf(domain)
+
+        # Enhanced SPF check with qualifier
+        result.has_spf, result.spf_record, result.spf_qualifier = self.check_spf(domain)
 
         # Enhanced DKIM check with key length
         (result.has_dkim, result.dkim_selectors, 
@@ -363,7 +422,12 @@ class ReportGenerator:
         full_protection = sum(1 for r in results if "Full Protection" in r.config_status)
         high_risk = sum(1 for r in results if "High Risk" in r.config_status)
 
-        # New statistics for DKIM key strength
+        # SPF qualifier statistics
+        spf_hardfail = sum(1 for r in results if r.spf_qualifier == "-all")
+        spf_softfail = sum(1 for r in results if r.spf_qualifier == "~all")
+        spf_weak = sum(1 for r in results if r.has_spf and r.spf_qualifier in ["?all", "+all", ""])
+
+        # DKIM key strength statistics
         weak_dkim = sum(1 for r in results if r.has_dkim and "Weak" in r.dkim_key_strength)
         strong_dkim = sum(1 for r in results if r.has_dkim and "Strong" in r.dkim_key_strength)
 
@@ -379,10 +443,16 @@ class ReportGenerator:
         print(f"{Fore.GREEN}======================================\n")
         print(f"Total Domains: {total}")
         print(f"Mail Enabled: {mail_enabled} ({mail_enabled/total*100:.1f}%)")
+
         print(f"\n{Fore.CYAN}Email Authentication:")
         print(f"  SPF Protected: {has_spf} ({has_spf/total*100:.1f}%)")
-        print(f"  DKIM Protected: {has_dkim} ({has_dkim/total*100:.1f}%)")
+        if has_spf > 0:
+            print(f"    - {Fore.GREEN}-all (Hard Fail): {spf_hardfail} [Best Practice]")
+            print(f"    - {Fore.CYAN}~all (Soft Fail): {spf_softfail} [Acceptable]")
+            if spf_weak > 0:
+                print(f"    - {Fore.YELLOW}?all/+all/none: {spf_weak} [Weak - Upgrade Recommended]")
 
+        print(f"  DKIM Protected: {has_dkim} ({has_dkim/total*100:.1f}%)")
         if has_dkim > 0:
             print(f"    - {Fore.GREEN}Strong Keys (2048-bit+): {strong_dkim}")
             if weak_dkim > 0:
@@ -461,6 +531,7 @@ class ReportGenerator:
     def print_high_risk(results: List[DomainResult]):
         """Print high risk domains and warnings"""
         high_risk = [r for r in results if "High Risk" in r.config_status]
+        weak_spf = [r for r in results if r.has_spf and r.spf_qualifier in ["?all", "+all", ""]]
         weak_keys = [r for r in results if r.has_dkim and "Weak" in r.dkim_key_strength]
         weak_dmarc = [r for r in results if r.has_dmarc and r.dmarc_policy == 'none']
 
@@ -473,6 +544,17 @@ class ReportGenerator:
 
             for r in high_risk:
                 print(f"{r.domain:<35} {r.security_score:<8} Missing SPF")
+
+        if weak_spf:
+            print(f"\n{Fore.YELLOW}======================================")
+            print(f"{Fore.YELLOW}Weak SPF Qualifiers (Upgrade Recommended)")
+            print(f"{Fore.YELLOW}======================================\n")
+            print(f"{'Domain':<35} {'Qualifier':<15} {'Recommendation'}")
+            print("-" * 85)
+
+            for r in weak_spf:
+                qualifier_display = r.spf_qualifier if r.spf_qualifier else "none"
+                print(f"{r.domain:<35} {qualifier_display:<15} Change to -all (hard fail)")
 
         if weak_keys:
             print(f"\n{Fore.YELLOW}======================================")
@@ -496,14 +578,14 @@ class ReportGenerator:
 
     @staticmethod
     def save_csv(results: List[DomainResult], output_path: Path):
-        """Save CSV report with enhanced DKIM and DMARC details"""
+        """Save CSV report with enhanced details"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file = output_path / f"domain_security_report_{timestamp}.csv"
 
         with open(csv_file, 'w', newline='', encoding='utf-8-sig') as f:
             fieldnames = [
                 'Domain', 'MX Record', 'MX Count', 'MX Details',
-                'SPF Record', 'SPF Content',
+                'SPF Record', 'SPF Content', 'SPF Qualifier',
                 'DKIM Record', 'DKIM Selectors', 'DKIM Key Length', 'DKIM Key Strength',
                 'DMARC Record', 'DMARC Content', 'DMARC Policy',
                 'A Record', 'IP Addresses',
@@ -521,6 +603,7 @@ class ReportGenerator:
                     'MX Details': r.mx_records,
                     'SPF Record': 'Yes' if r.has_spf else 'No',
                     'SPF Content': r.spf_record,
+                    'SPF Qualifier': r.spf_qualifier,
                     'DKIM Record': 'Yes' if r.has_dkim else 'No',
                     'DKIM Selectors': r.dkim_selectors,
                     'DKIM Key Length': r.dkim_key_length,
@@ -541,7 +624,7 @@ class ReportGenerator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Domain Security Scanner v2.1 - Enhanced DKIM and DMARC analysis',
+        description='Domain Security Scanner v2.2 - Enhanced SPF, DKIM, and DMARC analysis',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -549,6 +632,10 @@ Examples:
   %(prog)s -d example.com test.org
   %(prog)s -f domains.txt -o ./reports --max-retries 3
   %(prog)s -f domains.txt --dkim-selectors default,google,amazonses
+
+New in v2.2:
+  - SPF qualifier verification (-all recommended, ~all acceptable, ?all/+all weak)
+  - Enhanced SPF scoring based on qualifier strength
 
 New in v2.1:
   - DKIM key length verification (2048-bit recommended)
@@ -603,11 +690,11 @@ New in v2.1:
 
     # Start scanning
     print(f"{Fore.GREEN}======================================")
-    print(f"{Fore.GREEN}Domain Security Scanner v2.1")
+    print(f"{Fore.GREEN}Domain Security Scanner v2.2")
     print(f"{Fore.GREEN}======================================")
     print(f"{Fore.CYAN}Scanning {len(domains)} domains")
     print(f"{Fore.CYAN}DKIM Selectors: {args.dkim_selectors}")
-    print(f"{Fore.CYAN}Enhanced: DKIM key length + DMARC policy analysis")
+    print(f"{Fore.CYAN}Enhanced: SPF qualifier + DKIM key + DMARC policy analysis")
     print(f"{Fore.GREEN}======================================\n")
 
     results = []
