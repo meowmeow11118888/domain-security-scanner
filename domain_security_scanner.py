@@ -4,17 +4,25 @@
 Domain Security Scanner - Mail Security Configuration Tool
 
 Author: Your Name
-Version: 2.0
+Version: 2.1
 License: MIT
+
+Changelog v2.1:
+- Added DKIM key length verification (2048-bit recommended, 1024-bit weak)
+- Enhanced DMARC policy scoring (p=reject best, p=quarantine acceptable, p=none weak)
+- Improved security score calculation
+- Added detailed warnings for weak configurations
 """
 
 import dns.resolver
 import argparse
 import csv
 import sys
+import re
+import base64
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import time
 from colorama import init, Fore, Style
 import concurrent.futures
@@ -34,6 +42,8 @@ class DomainResult:
     spf_record: str = ""
     has_dkim: bool = False
     dkim_selectors: str = ""
+    dkim_key_length: str = ""  # New field for key length
+    dkim_key_strength: str = ""  # New field: Strong/Weak/Unknown
     has_dmarc: bool = False
     dmarc_record: str = ""
     dmarc_policy: str = ""
@@ -80,6 +90,47 @@ class DomainScanner:
                     return None
         return None
 
+    def extract_dkim_key_length(self, dkim_record: str) -> Tuple[Optional[int], str]:
+        """
+        Extract RSA key length from DKIM record
+        Returns: (key_length_bits, strength_assessment)
+        """
+        try:
+            # Extract public key from p= parameter
+            match = re.search(r'p=([A-Za-z0-9+/=]+)', dkim_record)
+            if not match:
+                return None, "Unknown"
+
+            key_data = match.group(1)
+
+            # Decode base64
+            try:
+                decoded = base64.b64decode(key_data)
+            except Exception:
+                return None, "Unknown"
+
+            # Estimate key length from decoded data length
+            # RSA public key in DER format: rough estimation
+            key_bytes = len(decoded)
+
+            # Common key sizes and their approximate encoded lengths
+            if key_bytes < 200:
+                key_bits = 1024
+                strength = "Weak"
+            elif key_bytes < 400:
+                key_bits = 2048
+                strength = "Strong"
+            elif key_bytes >= 400:
+                key_bits = 4096
+                strength = "Strong"
+            else:
+                return None, "Unknown"
+
+            return key_bits, strength
+
+        except Exception:
+            return None, "Unknown"
+
     def check_mx(self, domain: str) -> tuple:
         """Check MX records"""
         mx_records = self.query_dns_safe(domain, 'MX')
@@ -105,9 +156,14 @@ class DomainScanner:
 
         return False, ""
 
-    def check_dkim(self, domain: str) -> tuple:
-        """Check DKIM records"""
+    def check_dkim(self, domain: str) -> Tuple[bool, str, str, str]:
+        """
+        Check DKIM records with key length analysis
+        Returns: (has_dkim, selectors_info, key_lengths, key_strengths)
+        """
         found_selectors = []
+        key_lengths = []
+        key_strengths = []
 
         for selector in self.dkim_selectors:
             dkim_domain = f"{selector}._domainkey.{domain}"
@@ -117,12 +173,26 @@ class DomainScanner:
                 for record in txt_records:
                     txt = record.to_text().strip('"').replace('" "', '')
                     if 'v=DKIM1' in txt or 'p=' in txt:
-                        found_selectors.append(f"{selector} ({txt[:50]}...)")
+                        # Extract key length
+                        key_bits, strength = self.extract_dkim_key_length(txt)
+
+                        if key_bits:
+                            found_selectors.append(f"{selector} ({key_bits}-bit)")
+                            key_lengths.append(f"{selector}:{key_bits}-bit")
+                            key_strengths.append(f"{selector}:{strength}")
+                        else:
+                            found_selectors.append(f"{selector} (unknown length)")
+                            key_lengths.append(f"{selector}:Unknown")
+                            key_strengths.append(f"{selector}:Unknown")
                         break
 
         if found_selectors:
-            return True, "; ".join(found_selectors)
-        return False, ""
+            return (True, 
+                    "; ".join(found_selectors),
+                    "; ".join(key_lengths),
+                    "; ".join(key_strengths))
+
+        return False, "", "", ""
 
     def check_dmarc(self, domain: str) -> tuple:
         """Check DMARC records"""
@@ -138,7 +208,6 @@ class DomainScanner:
                 # Extract policy
                 policy = ""
                 if 'p=' in txt:
-                    import re
                     match = re.search(r'p=([^;]+)', txt)
                     if match:
                         policy = match.group(1).strip()
@@ -157,25 +226,55 @@ class DomainScanner:
         return True, ", ".join(ips)
 
     def calculate_score(self, result: DomainResult) -> int:
-        """Calculate security score"""
+        """
+        Calculate security score with enhanced DKIM and DMARC evaluation
+        Total: 100 points
+        """
         score = 0
+
+        # MX record: 20 points
         if result.has_mx:
             score += 20
+
+        # SPF record: 30 points
         if result.has_spf:
             score += 30
+
+        # DKIM record: up to 25 points
         if result.has_dkim:
-            score += 25
-        if result.has_dmarc:
-            score += 25
-            if result.dmarc_policy == 'reject':
+            # Base score for having DKIM
+            score += 15
+
+            # Additional points for strong keys
+            if "Weak" in result.dkim_key_strength:
+                # 1024-bit keys: only 5 more points (total 20/25)
+                score += 5
+            elif "Strong" in result.dkim_key_strength:
+                # 2048-bit or higher: full 10 more points (total 25/25)
                 score += 10
+            elif "Unknown" in result.dkim_key_strength:
+                # Unknown key length: 7 points (total 22/25)
+                score += 7
+
+        # DMARC record: up to 25 points
+        if result.has_dmarc:
+            if result.dmarc_policy == 'reject':
+                # Best practice: full 25 points
+                score += 25
             elif result.dmarc_policy == 'quarantine':
+                # Acceptable: 20 points
+                score += 20
+            elif result.dmarc_policy == 'none':
+                # Monitoring only: 10 points
+                score += 10
+            else:
+                # Unknown policy: 5 points
                 score += 5
 
         return min(score, 100)
 
     def assess_config(self, result: DomainResult) -> tuple:
-        """Assess configuration status and recommendations"""
+        """Assess configuration status and recommendations with enhanced checks"""
         recommendations = []
 
         if not result.has_mx and not result.has_spf:
@@ -184,25 +283,42 @@ class DomainScanner:
 
         result.mail_enabled = "Yes"
 
+        # Check DKIM key strength
+        if result.has_dkim and "Weak" in result.dkim_key_strength:
+            recommendations.append("[WARNING] DKIM uses weak 1024-bit key, upgrade to 2048-bit")
+
+        # Check DMARC policy
+        if result.has_dmarc:
+            if result.dmarc_policy == 'none':
+                recommendations.append("[WARNING] DMARC policy is 'none' (monitoring only), upgrade to 'quarantine' or 'reject'")
+            elif result.dmarc_policy == 'quarantine':
+                recommendations.append("Consider upgrading DMARC policy to p=reject for maximum protection")
+
         # Determine configuration status
         if (result.has_mx and result.has_spf and result.has_dkim and 
-            result.has_dmarc and result.dmarc_policy == 'reject'):
+            result.has_dmarc and result.dmarc_policy == 'reject' and
+            "Strong" in result.dkim_key_strength):
             status = "Full Protection (Best Practice)"
-        elif result.has_mx and result.has_spf and result.has_dkim and result.has_dmarc:
-            status = "Full Protection"
-            if result.dmarc_policy != 'reject':
-                recommendations.append("Consider upgrading DMARC policy to p=reject")
+        elif (result.has_mx and result.has_spf and result.has_dkim and 
+              result.has_dmarc and result.dmarc_policy in ['reject', 'quarantine']):
+            if "Weak" in result.dkim_key_strength:
+                status = "Good Protection (Weak DKIM Key)"
+            else:
+                status = "Full Protection"
         elif result.has_mx and result.has_spf and result.has_dmarc:
             status = "Good Protection (Missing DKIM)"
             recommendations.append("Recommend setting up DKIM for enhanced authentication")
+        elif result.has_mx and result.has_spf and result.has_dkim:
+            status = "Good Protection (Missing DMARC)"
+            recommendations.append("Recommend adding DMARC record with p=quarantine or p=reject")
         elif result.has_mx and result.has_spf:
             status = "Basic Protection"
-            recommendations.append("Recommend adding DMARC record")
-            recommendations.append("Recommend setting up DKIM authentication")
+            recommendations.append("Recommend adding DMARC record with p=quarantine or p=reject")
+            recommendations.append("Recommend setting up DKIM with 2048-bit key")
         elif result.has_mx and not result.has_spf:
             status = "High Risk (Missing SPF)"
             recommendations.append("[URGENT] Must add SPF record to prevent email spoofing")
-            recommendations.append("Recommend setting up both DKIM and DMARC")
+            recommendations.append("Recommend setting up DKIM with 2048-bit key and DMARC")
         elif not result.has_mx and result.has_spf:
             status = "Abnormal Configuration (SPF only, no MX)"
             recommendations.append("Check for misconfiguration or external mail service usage")
@@ -219,7 +335,11 @@ class DomainScanner:
         result.has_a, result.a_records = self.check_a(domain)
         result.has_mx, result.mx_count, result.mx_records = self.check_mx(domain)
         result.has_spf, result.spf_record = self.check_spf(domain)
-        result.has_dkim, result.dkim_selectors = self.check_dkim(domain)
+
+        # Enhanced DKIM check with key length
+        (result.has_dkim, result.dkim_selectors, 
+         result.dkim_key_length, result.dkim_key_strength) = self.check_dkim(domain)
+
         result.has_dmarc, result.dmarc_record, result.dmarc_policy = self.check_dmarc(domain)
 
         # Calculate score and assessment
@@ -242,6 +362,16 @@ class ReportGenerator:
         has_dmarc = sum(1 for r in results if r.has_dmarc)
         full_protection = sum(1 for r in results if "Full Protection" in r.config_status)
         high_risk = sum(1 for r in results if "High Risk" in r.config_status)
+
+        # New statistics for DKIM key strength
+        weak_dkim = sum(1 for r in results if r.has_dkim and "Weak" in r.dkim_key_strength)
+        strong_dkim = sum(1 for r in results if r.has_dkim and "Strong" in r.dkim_key_strength)
+
+        # DMARC policy statistics
+        dmarc_reject = sum(1 for r in results if r.dmarc_policy == 'reject')
+        dmarc_quarantine = sum(1 for r in results if r.dmarc_policy == 'quarantine')
+        dmarc_none = sum(1 for r in results if r.dmarc_policy == 'none')
+
         avg_score = sum(r.security_score for r in results) / total if total > 0 else 0
 
         print(f"\n{Fore.GREEN}======================================")
@@ -249,14 +379,28 @@ class ReportGenerator:
         print(f"{Fore.GREEN}======================================\n")
         print(f"Total Domains: {total}")
         print(f"Mail Enabled: {mail_enabled} ({mail_enabled/total*100:.1f}%)")
-        print(f"SPF Protected: {has_spf} ({has_spf/total*100:.1f}%)")
-        print(f"DKIM Protected: {has_dkim} ({has_dkim/total*100:.1f}%)")
-        print(f"DMARC Enabled: {has_dmarc} ({has_dmarc/total*100:.1f}%)")
-        print(f"{Fore.GREEN}Full Protection: {full_protection}")
-        print(f"{Fore.RED}High Risk Domains: {high_risk}")
+        print(f"\n{Fore.CYAN}Email Authentication:")
+        print(f"  SPF Protected: {has_spf} ({has_spf/total*100:.1f}%)")
+        print(f"  DKIM Protected: {has_dkim} ({has_dkim/total*100:.1f}%)")
+
+        if has_dkim > 0:
+            print(f"    - {Fore.GREEN}Strong Keys (2048-bit+): {strong_dkim}")
+            if weak_dkim > 0:
+                print(f"    - {Fore.YELLOW}Weak Keys (1024-bit): {weak_dkim} [Upgrade Recommended]")
+
+        print(f"  DMARC Enabled: {has_dmarc} ({has_dmarc/total*100:.1f}%)")
+        if has_dmarc > 0:
+            print(f"    - {Fore.GREEN}p=reject: {dmarc_reject}")
+            print(f"    - {Fore.CYAN}p=quarantine: {dmarc_quarantine}")
+            if dmarc_none > 0:
+                print(f"    - {Fore.YELLOW}p=none: {dmarc_none} [Monitoring Only]")
+
+        print(f"\n{Fore.CYAN}Overall Status:")
+        print(f"  {Fore.GREEN}Full Protection: {full_protection}")
+        print(f"  {Fore.RED}High Risk Domains: {high_risk}")
 
         score_color = Fore.GREEN if avg_score >= 70 else Fore.YELLOW if avg_score >= 40 else Fore.RED
-        print(f"{score_color}Average Security Score: {avg_score:.1f} / 100\n")
+        print(f"  {score_color}Average Security Score: {avg_score:.1f} / 100\n")
 
     @staticmethod
     def print_config_groups(results: List[DomainResult]):
@@ -269,12 +413,17 @@ class ReportGenerator:
         status_count = Counter(r.config_status for r in results)
 
         for status, count in status_count.most_common():
-            if "Full" in status:
+            if "Best Practice" in status:
+                color = Fore.GREEN
+            elif "Full Protection" in status:
                 color = Fore.GREEN
             elif "High Risk" in status:
                 color = Fore.RED
-            elif "Good" in status:
-                color = Fore.CYAN
+            elif "Good Protection" in status:
+                if "Weak" in status:
+                    color = Fore.YELLOW
+                else:
+                    color = Fore.CYAN
             elif "Basic" in status:
                 color = Fore.YELLOW
             else:
@@ -310,22 +459,44 @@ class ReportGenerator:
 
     @staticmethod
     def print_high_risk(results: List[DomainResult]):
-        """Print high risk domains"""
+        """Print high risk domains and warnings"""
         high_risk = [r for r in results if "High Risk" in r.config_status]
+        weak_keys = [r for r in results if r.has_dkim and "Weak" in r.dkim_key_strength]
+        weak_dmarc = [r for r in results if r.has_dmarc and r.dmarc_policy == 'none']
 
         if high_risk:
             print(f"\n{Fore.RED}======================================")
             print(f"{Fore.RED}High Risk Domains (Immediate Action Required)")
             print(f"{Fore.RED}======================================\n")
-            print(f"{'Domain':<30} {'Score':<10} {'Recommendations'}")
-            print("-" * 80)
+            print(f"{'Domain':<35} {'Score':<8} {'Issue'}")
+            print("-" * 85)
 
             for r in high_risk:
-                print(f"{r.domain:<30} {r.security_score:<10} {r.recommendations[:40]}")
+                print(f"{r.domain:<35} {r.security_score:<8} Missing SPF")
+
+        if weak_keys:
+            print(f"\n{Fore.YELLOW}======================================")
+            print(f"{Fore.YELLOW}Weak DKIM Keys (Upgrade Recommended)")
+            print(f"{Fore.YELLOW}======================================\n")
+            print(f"{'Domain':<35} {'Key Length':<15} {'Status'}")
+            print("-" * 85)
+
+            for r in weak_keys:
+                print(f"{r.domain:<35} 1024-bit        Weak - Upgrade to 2048-bit")
+
+        if weak_dmarc:
+            print(f"\n{Fore.YELLOW}======================================")
+            print(f"{Fore.YELLOW}Weak DMARC Policy (Monitoring Only)")
+            print(f"{Fore.YELLOW}======================================\n")
+            print(f"{'Domain':<35} {'Policy':<15} {'Recommendation'}")
+            print("-" * 85)
+
+            for r in weak_dmarc:
+                print(f"{r.domain:<35} p=none          Upgrade to p=quarantine or p=reject")
 
     @staticmethod
     def save_csv(results: List[DomainResult], output_path: Path):
-        """Save CSV report"""
+        """Save CSV report with enhanced DKIM and DMARC details"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file = output_path / f"domain_security_report_{timestamp}.csv"
 
@@ -333,7 +504,7 @@ class ReportGenerator:
             fieldnames = [
                 'Domain', 'MX Record', 'MX Count', 'MX Details',
                 'SPF Record', 'SPF Content',
-                'DKIM Record', 'DKIM Selectors',
+                'DKIM Record', 'DKIM Selectors', 'DKIM Key Length', 'DKIM Key Strength',
                 'DMARC Record', 'DMARC Content', 'DMARC Policy',
                 'A Record', 'IP Addresses',
                 'Mail Enabled', 'Security Score', 'Config Status', 'Recommendations'
@@ -352,6 +523,8 @@ class ReportGenerator:
                     'SPF Content': r.spf_record,
                     'DKIM Record': 'Yes' if r.has_dkim else 'No',
                     'DKIM Selectors': r.dkim_selectors,
+                    'DKIM Key Length': r.dkim_key_length,
+                    'DKIM Key Strength': r.dkim_key_strength,
                     'DMARC Record': 'Yes' if r.has_dmarc else 'No',
                     'DMARC Content': r.dmarc_record,
                     'DMARC Policy': r.dmarc_policy,
@@ -368,7 +541,7 @@ class ReportGenerator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Domain Security Scanner - Batch check DNS mail records and security configuration',
+        description='Domain Security Scanner v2.1 - Enhanced DKIM and DMARC analysis',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -376,6 +549,11 @@ Examples:
   %(prog)s -d example.com test.org
   %(prog)s -f domains.txt -o ./reports --max-retries 3
   %(prog)s -f domains.txt --dkim-selectors default,google,amazonses
+
+New in v2.1:
+  - DKIM key length verification (2048-bit recommended)
+  - Enhanced DMARC policy evaluation (p=reject best practice)
+  - Improved security scoring
 """
     )
 
@@ -425,10 +603,11 @@ Examples:
 
     # Start scanning
     print(f"{Fore.GREEN}======================================")
-    print(f"{Fore.GREEN}Domain Security Scanner v2.0")
+    print(f"{Fore.GREEN}Domain Security Scanner v2.1")
     print(f"{Fore.GREEN}======================================")
     print(f"{Fore.CYAN}Scanning {len(domains)} domains")
     print(f"{Fore.CYAN}DKIM Selectors: {args.dkim_selectors}")
+    print(f"{Fore.CYAN}Enhanced: DKIM key length + DMARC policy analysis")
     print(f"{Fore.GREEN}======================================\n")
 
     results = []
