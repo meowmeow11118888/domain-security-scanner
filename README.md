@@ -6,19 +6,6 @@
 
 Batch check domain mail security configuration including MX, SPF, DKIM, DMARC records with **SPF qualifier analysis**, **DKIM key strength analysis** and **DMARC policy evaluation**. Get detailed risk assessment and remediation recommendations.
 
-## ✨ What's New in v2.2
-
-- 📧 **SPF Qualifier Analysis**: Detect -all (best), ~all (acceptable), ?all/+all (weak)
-- ⚡ **Enhanced SPF Scoring**: -all gets 30 points, ~all gets 28 points
-- ⚠️ **Weak SPF Warnings**: Automatic alerts for weak qualifiers
-
-## What's New in v2.1
-
-- 🔑 **DKIM Key Length Analysis**: Detect 1024-bit (weak) vs 2048-bit (strong) RSA keys
-- 🛡️ **Enhanced DMARC Evaluation**: Detailed scoring for p=reject/quarantine/none policies
-- ⚠️ **Smart Warnings**: Automatic alerts for weak configurations
-- 📊 **Improved Scoring**: More accurate security assessment
-
 ## Features
 
 - ✅ **Batch Scanning**: Check dozens to hundreds of domains at once
